@@ -55,6 +55,8 @@
  * Old backends reject the unknown event. No table size or API version changes.
  * Requires the exact already-ACKed cookie and no request MAC payload. */
 #define RTW89_FRONT_VIF_SERVICE_READY 5u
+/* Read-only query: true only when the hardware chip can host an AWDL VIF. */
+#define RTW89_FRONT_VIF_CAPABLE 6u
 /* OWLY_NATIVE_IDENTITY_BRIDGE_END */
 /* Identity tracking only: no packet ownership or Apple object dereference. */
 /* OWLY ABI4: identity tokens only; neither side owns the Apple object.

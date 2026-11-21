@@ -82,6 +82,25 @@ void rtw89_ccmp_encrypt(const uint8_t tk[16], const uint8_t *hdr, size_t hdr_len
 bool rtw89_ccmp_decrypt(const uint8_t tk[16], const uint8_t *hdr, size_t hdr_len, uint64_t pn,
                         uint8_t *payload, size_t len, const uint8_t mic[RTW89_CCMP_MIC_LEN]);
 
+/*
+ * TKIP (IEEE 802.11 12.5.2) in software, for WPA2 networks whose group cipher
+ * is TKIP on chips without hardware TKIP crypto (e.g. RTL8852A/B). @key is the
+ * 32-byte GTK in wire order: [0..15] TK, [16..23] Authenticator->Supplicant
+ * Michael MIC key. @ta is the transmitter address (AP BSSID).
+ */
+#define RTW89_TKIP_KEY_LEN 32
+#define RTW89_TKIP_MIC_LEN 8
+#define RTW89_TKIP_ICV_LEN 4
+void rtw89_michael_mic(const uint8_t key[8], const uint8_t da[6], const uint8_t sa[6],
+                       uint8_t prio, const uint8_t *data, size_t len,
+                       uint8_t mic[RTW89_TKIP_MIC_LEN]);
+void rtw89_tkip_encrypt(const uint8_t key[RTW89_TKIP_KEY_LEN], const uint8_t ta[6],
+                        const uint8_t da[6], const uint8_t sa[6], uint8_t prio,
+                        uint32_t iv32, uint16_t iv16, uint8_t *buf, size_t msdu_len);
+bool rtw89_tkip_decrypt(const uint8_t key[RTW89_TKIP_KEY_LEN], const uint8_t ta[6],
+                        const uint8_t da[6], const uint8_t sa[6], uint8_t prio,
+                        uint32_t iv32, uint16_t iv16, uint8_t *buf, size_t len);
+
 /* Compare without leaking where the difference is. */
 bool rtw89_crypto_equal(const uint8_t *a, const uint8_t *b, size_t len);
 

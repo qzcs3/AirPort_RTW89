@@ -308,6 +308,44 @@ static void test_crypto(void)
         rtw89_ccmp_encrypt(tk, hdr, sizeof(hdr), 0xb5039776e70cULL, buf, sizeof(buf), mic);
         CHECK(!rtw89_ccmp_decrypt(tk, hdr, sizeof(hdr), 0xb5039776e70dULL, buf, sizeof(buf), mic));
     }
+
+    /* TKIP + Michael MIC (IEEE 802.11 12.5.2) */
+    {
+        static const u8 gtk[RTW89_TKIP_KEY_LEN] = {
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+            0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22,
+        };
+        static const u8 ta[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
+        static const u8 da[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+        static const u8 sa[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02 };
+        static const u8 plain[21] = {
+            0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x08, 0x06,
+            0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01,
+            0xde, 0xad, 0xbe, 0xef, 0x42,
+        };
+        u8 buf[sizeof(plain) + RTW89_TKIP_MIC_LEN + RTW89_TKIP_ICV_LEN];
+        u8 saved[sizeof(buf)];
+
+        memcpy(buf, plain, sizeof(plain));
+        rtw89_tkip_encrypt(gtk, ta, da, sa, 0, 0x00001234u, 0x5678u, buf, sizeof(plain));
+        memcpy(saved, buf, sizeof(buf));
+        CHECK(memcmp(buf, plain, sizeof(plain)) != 0);
+        CHECK(rtw89_tkip_decrypt(gtk, ta, da, sa, 0, 0x00001234u, 0x5678u, buf, sizeof(buf)));
+        CHECK(!memcmp(buf, plain, sizeof(plain)));
+
+        /* wrong IV fails ICV/MIC */
+        memcpy(buf, saved, sizeof(buf));
+        CHECK(!rtw89_tkip_decrypt(gtk, ta, da, sa, 0, 0x00001234u, 0x5679u, buf, sizeof(buf)));
+        /* wrong DA fails Michael MIC */
+        memcpy(buf, saved, sizeof(buf));
+        CHECK(!rtw89_tkip_decrypt(gtk, ta, ta, sa, 0, 0x00001234u, 0x5678u, buf, sizeof(buf)));
+        /* flipped ciphertext bit fails ICV */
+        memcpy(buf, saved, sizeof(buf));
+        buf[5] ^= 0x01;
+        CHECK(!rtw89_tkip_decrypt(gtk, ta, da, sa, 0, 0x00001234u, 0x5678u, buf, sizeof(buf)));
+    }
 }
 
 /* ---- cfg80211 helpers ---- */

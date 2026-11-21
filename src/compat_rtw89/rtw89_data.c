@@ -31,6 +31,7 @@
  * tx_lock.
  */
 #include "rtw89_net80211.h"
+#include "rtw89_crypto.h"
 
 #define DATA_MAX_FRAME      (ETH_HLEN + IEEE80211_MAX_DATA_LEN)
 /* 802.11 QoS header, CCMP header and LLC/SNAP in front of the payload */
@@ -53,6 +54,9 @@
 /* Receive state of one key: the last packet number seen per TID. */
 struct data_rx_key {
     bool valid;
+    bool tkip;
+    u8 tkip_key[RTW89_TKIP_KEY_LEN];
+    bool pn_seen[DATA_NUM_TIDS];
     u64 pn[DATA_NUM_TIDS];
 };
 
@@ -298,8 +302,32 @@ void rtw89_data_set_rx_key(int keyidx, bool valid, u64 rsc)
 
     spin_lock(&data.rx_lock);
     key->valid = valid;
-    for (i = 0; i < DATA_NUM_TIDS; i++)
+    key->tkip = false;
+    memset(key->tkip_key, 0, sizeof(key->tkip_key));
+    for (i = 0; i < DATA_NUM_TIDS; i++) {
         key->pn[i] = rsc;
+        key->pn_seen[i] = false;
+    }
+    spin_unlock(&data.rx_lock);
+}
+
+void rtw89_data_set_rx_tkip_key(int keyidx, const u8 *gtk, u64 rsc)
+{
+    struct data_rx_key *key;
+    int i;
+
+    if (keyidx < 0 || keyidx > 3 || !gtk)
+        return;
+    key = &data.rx_gtk[keyidx];
+
+    spin_lock(&data.rx_lock);
+    key->valid = true;
+    key->tkip = true;
+    memcpy(key->tkip_key, gtk, RTW89_TKIP_KEY_LEN);
+    for (i = 0; i < DATA_NUM_TIDS; i++) {
+        key->pn[i] = rsc;
+        key->pn_seen[i] = false;
+    }
     spin_unlock(&data.rx_lock);
 }
 
@@ -690,12 +718,7 @@ static void data_rx_one(struct sk_buff *skb)
         unsigned int keyid;
         u64 pn;
 
-        /* Decrypted by the hardware, which leaves the CCMP header and MIC. */
-        if (!(status->flag & RX_FLAG_DECRYPTED)) {
-            data.stats.rx_undecrypted++;
-            goto drop;
-        }
-        if (len < IEEE80211_CCMP_HDR_LEN + IEEE80211_CCMP_MIC_LEN || !(payload[3] & 0x20))
+        if (len < IEEE80211_CCMP_HDR_LEN || !(payload[3] & 0x20))
             goto drop;
         keyid = payload[3] >> 6;
         if (mcast)
@@ -707,20 +730,68 @@ static void data_rx_one(struct sk_buff *skb)
         if (!key->valid)
             goto drop;
 
-        /* the packet number must go up within each TID */
-        pn = payload[0] | (u64)payload[1] << 8 | (u64)payload[4] << 16 |
-             (u64)payload[5] << 24 | (u64)payload[6] << 32 | (u64)payload[7] << 40;
-        if (!(status->flag & RX_FLAG_PN_VALIDATED)) {
-            if (pn <= key->pn[tid]) {
+        if (key->tkip) {
+            u16 iv16;
+            u32 iv32;
+            u8 prio = ieee80211_is_data_qos(fc) ? (u8)tid : 0;
+
+            if (len < IEEE80211_TKIP_IV_LEN + RTW89_TKIP_MIC_LEN + RTW89_TKIP_ICV_LEN)
+                goto drop;
+            iv16 = ((u16)payload[0] << 8) | payload[2];
+            iv32 = get_unaligned_le32(payload + 4);
+            pn = ((u64)iv32 << 16) | iv16;
+            if ((key->pn[tid] || key->pn_seen[tid]) && pn <= key->pn[tid]) {
                 data.stats.rx_replay++;
                 goto drop;
             }
-            key->pn[tid] = pn;
-        }
+            if (!(status->flag & RX_FLAG_DECRYPTED)) {
+                if (!rtw89_tkip_decrypt(key->tkip_key, hdr->addr2, hdr->addr1, hdr->addr3,
+                                        prio, iv32, iv16, payload + IEEE80211_TKIP_IV_LEN,
+                                        len - IEEE80211_TKIP_IV_LEN)) {
+                    data.stats.rx_undecrypted++;
+                    goto drop;
+                }
+            } else {
+                size_t msdu_len = len - IEEE80211_TKIP_IV_LEN - RTW89_TKIP_MIC_LEN -
+                                  RTW89_TKIP_ICV_LEN;
+                u8 calc_mic[RTW89_TKIP_MIC_LEN];
 
-        payload += IEEE80211_CCMP_HDR_LEN;
-        len -= IEEE80211_CCMP_HDR_LEN + IEEE80211_CCMP_MIC_LEN;
-        decrypted = true;
+                rtw89_michael_mic(key->tkip_key + 16, hdr->addr1, hdr->addr3, prio,
+                                  payload + IEEE80211_TKIP_IV_LEN, msdu_len, calc_mic);
+                if (!rtw89_crypto_equal(calc_mic,
+                                        payload + IEEE80211_TKIP_IV_LEN + msdu_len,
+                                        RTW89_TKIP_MIC_LEN))
+                    goto drop;
+            }
+            key->pn[tid] = pn;
+            key->pn_seen[tid] = true;
+            payload += IEEE80211_TKIP_IV_LEN;
+            len -= IEEE80211_TKIP_IV_LEN + RTW89_TKIP_MIC_LEN + RTW89_TKIP_ICV_LEN;
+            decrypted = true;
+        } else {
+            /* Decrypted by the hardware, which leaves the CCMP header and MIC. */
+            if (!(status->flag & RX_FLAG_DECRYPTED)) {
+                data.stats.rx_undecrypted++;
+                goto drop;
+            }
+            if (len < IEEE80211_CCMP_HDR_LEN + IEEE80211_CCMP_MIC_LEN)
+                goto drop;
+
+            /* the packet number must go up within each TID */
+            pn = payload[0] | (u64)payload[1] << 8 | (u64)payload[4] << 16 |
+                 (u64)payload[5] << 24 | (u64)payload[6] << 32 | (u64)payload[7] << 40;
+            if (!(status->flag & RX_FLAG_PN_VALIDATED)) {
+                if (pn <= key->pn[tid]) {
+                    data.stats.rx_replay++;
+                    goto drop;
+                }
+                key->pn[tid] = pn;
+            }
+
+            payload += IEEE80211_CCMP_HDR_LEN;
+            len -= IEEE80211_CCMP_HDR_LEN + IEEE80211_CCMP_MIC_LEN;
+            decrypted = true;
+        }
     }
 
     /* the Ethernet header is written over the end of the 802.11 one */

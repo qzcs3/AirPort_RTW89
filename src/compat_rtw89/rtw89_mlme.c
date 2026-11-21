@@ -401,8 +401,16 @@ static void mlme_parse_rates(const u8 *ies, size_t len, u32 *rates, u32 *basic)
  * group traffic, the only ones taken), the key management suites and the
  * capabilities. Fills mlme.group_cipher, ap_akms and ap_rsn_caps.
  */
+static bool mlme_group_is_tkip(void)
+{
+    static const u8 suite_tkip[4] = { 0x00, 0x0f, 0xac, 2 };
+
+    return !memcmp(mlme.group_cipher, suite_tkip, 4);
+}
+
 static int mlme_parse_rsn(const struct element *rsn)
 {
+    static const u8 suite_tkip[4] = { 0x00, 0x0f, 0xac, 2 };
     static const u8 suite_ccmp[4] = { 0x00, 0x0f, 0xac, 4 };
     static const u8 suite_bip[4] = { 0x00, 0x0f, 0xac, 6 };
     const u8 *p = rsn->data, *end = rsn->data + rsn->datalen;
@@ -460,8 +468,9 @@ static int mlme_parse_rsn(const struct element *rsn)
         mlme_info("the network does not offer CCMP as pairwise cipher");
         return -EOPNOTSUPP;
     }
-    if (memcmp(mlme.group_cipher, suite_ccmp, 4)) {
-        mlme_info("the network's group cipher is not CCMP (%02x-%02x-%02x:%u)",
+    if (memcmp(mlme.group_cipher, suite_ccmp, 4) &&
+        memcmp(mlme.group_cipher, suite_tkip, 4)) {
+        mlme_info("the network's group cipher is not CCMP or TKIP (%02x-%02x-%02x:%u)",
                   mlme.group_cipher[0], mlme.group_cipher[1], mlme.group_cipher[2],
                   mlme.group_cipher[3]);
         return -EOPNOTSUPP;
@@ -512,7 +521,7 @@ static int mlme_choose_akm(bool sae, bool psk)
     ie[1] = 20;
     ie[2] = 1;                                          /* version */
     ie[3] = 0;
-    memcpy(ie + 4, "\x00\x0f\xac\x04", 4);              /* group cipher: CCMP */
+    memcpy(ie + 4, mlme.group_cipher, 4);               /* group cipher: CCMP or TKIP */
     memcpy(ie + 8, "\x01\x00\x00\x0f\xac\x04", 6);      /* pairwise: CCMP */
     memcpy(ie + 14, "\x01\x00\x00\x0f\xac", 5);          /* one AKM */
     ie[19] = mlme.akm;
@@ -799,10 +808,11 @@ static int mlme_key_install(struct ieee80211_key_conf **slot, struct ieee80211_s
 }
 
 /* True if @conf is already this very key. */
-static bool mlme_key_is(const struct ieee80211_key_conf *conf, const u8 *key, s8 keyidx)
+static bool mlme_key_is(const struct ieee80211_key_conf *conf, const u8 *key,
+                        size_t len, s8 keyidx)
 {
-    return conf && conf->keyidx == keyidx &&
-           rtw89_crypto_equal(conf->key, key, WLAN_KEY_LEN_CCMP);
+    return conf && conf->keyidx == keyidx && conf->keylen == len &&
+           rtw89_crypto_equal(conf->key, key, len);
 }
 
 static void mlme_key_remove(struct ieee80211_key_conf **slot, struct ieee80211_sta *sta)
@@ -812,23 +822,42 @@ static void mlme_key_remove(struct ieee80211_key_conf **slot, struct ieee80211_s
     if (!conf)
         return;
     *slot = NULL;
-    mlme.local->ops->set_key(mlme.hw, DISABLE_KEY, mlme.vif, sta, conf);
-    rtw89_m80211_key_del(mlme.hw, conf);
+    if (conf->cipher != WLAN_CIPHER_SUITE_TKIP) {
+        mlme.local->ops->set_key(mlme.hw, DISABLE_KEY, mlme.vif, sta, conf);
+        rtw89_m80211_key_del(mlme.hw, conf);
+    }
     /* the key itself goes now; a frame still queued may point at the rest */
-    memset(conf->key, 0, WLAN_KEY_LEN_CCMP);
+    memset(conf->key, 0, conf->keylen);
     rtw89_m80211_free_later(mlme.hw, conf, NULL);
 }
 
 /* Install the group key with id @idx unless it is the one already there. */
-static int mlme_gtk_install(int idx, const u8 *gtk, u64 rsc)
+static int mlme_gtk_install(int idx, const u8 *gtk, size_t len, u64 rsc)
 {
     int ret;
 
-    if (mlme_key_is(mlme.gtk_conf[idx], gtk, (s8)idx))
+    if (mlme_key_is(mlme.gtk_conf[idx], gtk, len, (s8)idx))
         return 0;
     if (mlme.gtk_conf[idx]) {
         rtw89_data_set_rx_key(idx, false, 0);
         mlme_key_remove(&mlme.gtk_conf[idx], NULL);
+    }
+    if (len == WLAN_KEY_LEN_TKIP) {
+        struct ieee80211_key_conf *conf;
+
+        conf = kzalloc(sizeof(*conf) + WLAN_KEY_LEN_TKIP, GFP_KERNEL);
+        if (!conf)
+            return -ENOMEM;
+        conf->cipher = WLAN_CIPHER_SUITE_TKIP;
+        conf->keyidx = (s8)idx;
+        conf->keylen = WLAN_KEY_LEN_TKIP;
+        conf->icv_len = IEEE80211_TKIP_ICV_LEN;
+        conf->iv_len = IEEE80211_TKIP_IV_LEN;
+        conf->link_id = -1;
+        memcpy(conf->key, gtk, WLAN_KEY_LEN_TKIP);
+        mlme.gtk_conf[idx] = conf;
+        rtw89_data_set_rx_tkip_key(idx, gtk, rsc);
+        return 0;
     }
     ret = mlme_key_install(&mlme.gtk_conf[idx], NULL, gtk, (s8)idx);
     if (!ret)
@@ -2745,8 +2774,10 @@ static bool mlme_verify_mic(const u8 *copy, size_t len, const u8 *their_mic)
 
 /* Find the group key in decrypted key data: a KDE dd <len> 00-0f-ac 01
  * <key id | tx> <reserved> <key>. Returns the key id, or -1. */
-static int mlme_find_gtk(const u8 *kd, size_t len, const u8 **gtk)
+static int mlme_find_gtk(const u8 *kd, size_t len, const u8 **gtk, size_t *gtk_len)
 {
+    const size_t expect = mlme_group_is_tkip() ? WLAN_KEY_LEN_TKIP : WLAN_KEY_LEN_CCMP;
+
     while (len >= 2) {
         u8 id = kd[0], elen = kd[1];
 
@@ -2754,9 +2785,10 @@ static int mlme_find_gtk(const u8 *kd, size_t len, const u8 **gtk)
             break;
         if ((size_t)elen + 2 > len)
             break;
-        if (id == 0xdd && elen == 6 + WLAN_KEY_LEN_CCMP &&
+        if (id == 0xdd && elen == 6 + expect &&
             kd[2] == 0x00 && kd[3] == 0x0f && kd[4] == 0xac && kd[5] == 1) {
             *gtk = kd + 8;
+            *gtk_len = expect;
             return kd[6] & 0x03;
         }
         kd += elen + 2;
@@ -2768,6 +2800,7 @@ static int mlme_find_gtk(const u8 *kd, size_t len, const u8 **gtk)
 static void mlme_rx_eapol(const u8 *e, size_t len)
 {
     const u8 *k = e + EAPOL_HDR_LEN, *kd, *gtk = NULL;
+    size_t gtk_len = 0;
     u8 plain[256], copy[512];
     u16 key_info, body_len, kd_len;
     int gtk_idx = -1;
@@ -2863,7 +2896,7 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
             mlme_info("could not decrypt the EAPOL key data");
             return;
         }
-        gtk_idx = mlme_find_gtk(plain, kd_len - 8, &gtk);
+        gtk_idx = mlme_find_gtk(plain, kd_len - 8, &gtk, &gtk_len);
     }
 
     if (key_info & KEY_INFO_PAIRWISE) {
@@ -2886,7 +2919,8 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
          * same key again: that would restart its packet numbers, and reusing
          * a packet number breaks CCMP (the KRACK attack).
          */
-        if ((key_info & KEY_INFO_INSTALL) && !mlme_key_is(mlme.ptk_conf, mlme.ptk.tk, 0)) {
+        if ((key_info & KEY_INFO_INSTALL) &&
+            !mlme_key_is(mlme.ptk_conf, mlme.ptk.tk, WLAN_KEY_LEN_CCMP, 0)) {
             /* a renewed key: data waits until the new one is in */
             rtw89_data_set_tx_key(NULL);
             rtw89_data_set_rx_key(-1, false, 0);
@@ -2900,7 +2934,7 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
             if (mlme.sta_state == IEEE80211_STA_AUTHORIZED)
                 mlme_info("pairwise key renewed");
         }
-        if (mlme_gtk_install(gtk_idx, gtk, rsc)) {
+        if (mlme_gtk_install(gtk_idx, gtk, gtk_len, rsc)) {
             mlme_fail(-EIO, "the driver refused the group key");
             goto out;
         }
@@ -2924,9 +2958,9 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
             goto out;
         mlme_send_eapol_key(&mlme.ptk, e[0], KEY_INFO_SECURE, k + KEY_OFF_REPLAY,
                             NULL, NULL, 0);
-        if (mlme_key_is(mlme.gtk_conf[gtk_idx], gtk, (s8)gtk_idx))
+        if (mlme_key_is(mlme.gtk_conf[gtk_idx], gtk, gtk_len, (s8)gtk_idx))
             goto out;
-        if (mlme_gtk_install(gtk_idx, gtk, rsc))
+        if (mlme_gtk_install(gtk_idx, gtk, gtk_len, rsc))
             mlme_info("the driver refused the new group key");
         else
             mlme_info("group key renewed");
@@ -4090,11 +4124,14 @@ int rtw89_mlme_set_key(bool pairwise, int idx, const u8 *key, size_t len, u64 rs
 {
     if (!mlme.running || !mlme.external || !mlme.sta || mlme.state != RTW89_MLME_CONNECTED)
         return -ENOLINK;
-    if (len != WLAN_KEY_LEN_CCMP || idx < 0 || idx > 3)
+    if (idx < 0 || idx > 3)
+        return -EOPNOTSUPP;
+    if (pairwise ? len != WLAN_KEY_LEN_CCMP :
+        (len != WLAN_KEY_LEN_CCMP && len != WLAN_KEY_LEN_TKIP))
         return -EOPNOTSUPP;
 
     if (pairwise) {
-        if (!mlme_key_is(mlme.ptk_conf, key, 0)) {
+        if (!mlme_key_is(mlme.ptk_conf, key, WLAN_KEY_LEN_CCMP, 0)) {
             rtw89_data_set_tx_key(NULL);
             rtw89_data_set_rx_key(-1, false, 0);
             mlme_key_remove(&mlme.ptk_conf, mlme.sta);
@@ -4103,7 +4140,7 @@ int rtw89_mlme_set_key(bool pairwise, int idx, const u8 *key, size_t len, u64 rs
             rtw89_data_set_rx_key(-1, true, 0);
             rtw89_data_set_tx_key(mlme.ptk_conf);
         }
-    } else if (mlme_gtk_install(idx, key, rsc)) {
+    } else if (mlme_gtk_install(idx, key, len, rsc)) {
         return -EIO;
     }
 

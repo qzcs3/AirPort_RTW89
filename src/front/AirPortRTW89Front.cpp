@@ -1235,6 +1235,10 @@ SInt32 AirPortRTW89Front::owlyRequestAWDLCreate(unsigned int type, void *data)
     const bool validMac = nonzero && !(req->mac[0] & 1);
     setProperty("OWLY Gate14 mac_valid", validMac ? 1ULL : 0ULL, 32);
     if (!validMac) return kIOReturnBadArgument;
+    if (!owlyBackendAWDLCapable()) {
+        setProperty("OWLY Gate14 chip_capable", 0ULL, 32);
+        return kIOReturnUnsupported;
+    }
 
     IO80211VirtualInterface *newVif = nullptr;
     bool retryPending = false;
@@ -1844,6 +1848,16 @@ bool AirPortRTW89Front::owlyVifIsTracked(IO80211VirtualInterface *vif)
     return tracked;
 }
 
+bool AirPortRTW89Front::owlyBackendAWDLCapable()
+{
+    const bool there = backEnter();
+    const bool capable = there && _back.vif_event &&
+        _back.vif_event(_back.ctx, this, RTW89_FRONT_ROLE_AIRLINK_OBSERVED,
+                        RTW89_FRONT_VIF_CAPABLE, nullptr);
+    backLeave();
+    return capable;
+}
+
 /* The callback MUST NOT run under _owlyVifLock: a callback can reenter
  * IO80211 or disconnect. Reserve one in-flight transaction under the lock,
  * release it for the backend call, and commit only after ACK. Reentrancy
@@ -1955,6 +1969,8 @@ IO80211VirtualInterface *AirPortRTW89Front::createVirtualInterface(struct ether_
             LOG("OWLY M1: refusing AirLink VIF without MAC address");
             return nullptr;
         }
+        if (!owlyBackendAWDLCapable())
+            return nullptr;
 #if OWLY_ABI6_NATIVE_P2P_FACTORY
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
         IO80211VirtualInterface *airlink = OSTypeAlloc(OwlyNativeP2PInterface);

@@ -851,6 +851,8 @@ bool AirPort_RTW89::backVifEvent(void *ctx, void *vif, uint32_t role, uint32_t e
         me->_nativeClosing || me->_halting || me->_asleep)
         return false;
     NativeState *ns = me->_ns;
+    if (event == RTW89_FRONT_VIF_CAPABLE)
+        return !request_mac && rtw89_glue_awdl_capable();
 #if defined(OWLY_AWDL_SERVICE_LIFECYCLE) && OWLY_AWDL_SERVICE_LIFECYCLE
     if (event == RTW89_FRONT_VIF_SERVICE_READY) {
         const bool ready = !request_mac && ns->airlink.cookie == vif &&

@@ -788,6 +788,266 @@ bool rtw89_ccmp_decrypt(const uint8_t tk[16], const uint8_t *hdr, size_t hdr_len
     return rtw89_crypto_equal(x, mic, RTW89_CCMP_MIC_LEN);
 }
 
+/* ------------------------------------------------------------------ */
+/*  TKIP & Michael MIC (IEEE 802.11 12.5.2)                             */
+/* ------------------------------------------------------------------ */
+
+static uint16_t tkip_le16(const uint8_t *p)
+{
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t tkip_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void tkip_put_le16(uint16_t v, uint8_t *p)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static void tkip_put_le32(uint32_t v, uint8_t *p)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static uint16_t tkip_ror16(uint16_t v, unsigned int n)
+{
+    return (uint16_t)((v >> n) | (v << (16 - n)));
+}
+
+static const uint16_t tkip_sbox[256] = {
+    0xC6A5, 0xF884, 0xEE99, 0xF68D, 0xFF0D, 0xD6BD, 0xDEB1, 0x9154,
+    0x6050, 0x0203, 0xCEA9, 0x567D, 0xE719, 0xB562, 0x4DE6, 0xEC9A,
+    0x8F45, 0x1F9D, 0x8940, 0xFA87, 0xEF15, 0xB2EB, 0x8EC9, 0xFB0B,
+    0x41EC, 0xB367, 0x5FFD, 0x45EA, 0x23BF, 0x53F7, 0xE496, 0x9B5B,
+    0x75C2, 0xE11C, 0x3DAE, 0x4C6A, 0x6C5A, 0x7E41, 0xF502, 0x834F,
+    0x685C, 0x51F4, 0xD134, 0xF908, 0xE293, 0xAB73, 0x6253, 0x2A3F,
+    0x080C, 0x9552, 0x4665, 0x9D5E, 0x3028, 0x37A1, 0x0A0F, 0x2FB5,
+    0x0E09, 0x2436, 0x1B9B, 0xDF3D, 0xCD26, 0x4E69, 0x7FCD, 0xEA9F,
+    0x121B, 0x1D9E, 0x5874, 0x342E, 0x362D, 0xDCB2, 0xB4EE, 0x5BFB,
+    0xA4F6, 0x764D, 0xB761, 0x7DCE, 0x527B, 0xDD3E, 0x5E71, 0x1397,
+    0xA6F5, 0xB968, 0x0000, 0xC12C, 0x4060, 0xE31F, 0x79C8, 0xB6ED,
+    0xD4BE, 0x8D46, 0x67D9, 0x724B, 0x94DE, 0x98D4, 0xB0E8, 0x854A,
+    0xBB6B, 0xC52A, 0x4FE5, 0xED16, 0x86C5, 0x9AD7, 0x6655, 0x1194,
+    0x8ACF, 0xE910, 0x0406, 0xFE81, 0xA0F0, 0x7844, 0x25BA, 0x4BE3,
+    0xA2F3, 0x5DFE, 0x80C0, 0x058A, 0x3FAD, 0x21BC, 0x7048, 0xF104,
+    0x63DF, 0x77C1, 0xAF75, 0x4263, 0x2030, 0xE51A, 0xFD0E, 0xBF6D,
+    0x814C, 0x1814, 0x2635, 0xC32F, 0xBEE1, 0x35A2, 0x88CC, 0x2E39,
+    0x9357, 0x55F2, 0xFC82, 0x7A47, 0xC8AC, 0xBAE7, 0x322B, 0xE695,
+    0xC0A0, 0x1998, 0x9ED1, 0xA37F, 0x4466, 0x547E, 0x3BAB, 0x0B83,
+    0x8CCA, 0xC729, 0x6BD3, 0x283C, 0xA779, 0xBCE2, 0x161D, 0xAD76,
+    0xDB3B, 0x6456, 0x744E, 0x141E, 0x92DB, 0x0C0A, 0x486C, 0xB8E4,
+    0x9F5D, 0xBD6E, 0x43EF, 0xC4A6, 0x39A8, 0x31A4, 0xD337, 0xF28B,
+    0xD532, 0x8B43, 0x6E59, 0xDAB7, 0x018C, 0xB164, 0x9CD2, 0x49E0,
+    0xD8B4, 0xACFA, 0xF307, 0xCF25, 0xCAAF, 0xF48E, 0x47E9, 0x1018,
+    0x6FD5, 0xF088, 0x4A6F, 0x5C72, 0x3824, 0x57F1, 0x73C7, 0x9751,
+    0xCB23, 0xA17C, 0xE89C, 0x3E21, 0x96DD, 0x61DC, 0x0D86, 0x0F85,
+    0xE090, 0x7C42, 0x71C4, 0xCCAA, 0x90D8, 0x0605, 0xF701, 0x1C12,
+    0xC2A3, 0x6A5F, 0xAEF9, 0x69D0, 0x1791, 0x9958, 0x3A27, 0x27B9,
+    0xD938, 0xEB13, 0x2BB3, 0x2233, 0xD2BB, 0xA970, 0x0789, 0x33A7,
+    0x2DB6, 0x3C22, 0x1592, 0xC920, 0x8749, 0xAAFF, 0x5078, 0xA57A,
+    0x038F, 0x59F8, 0x0980, 0x1A17, 0x65DA, 0xD731, 0x84C6, 0xD0B8,
+    0x82C3, 0x29B0, 0x5A77, 0x1E11, 0x7BCB, 0xA8FC, 0x6DD6, 0x2C3A,
+};
+
+static uint16_t tkip_s(uint16_t v)
+{
+    uint16_t hi = tkip_sbox[v >> 8];
+
+    return (uint16_t)(tkip_sbox[v & 0xff] ^ ((hi >> 8) | (hi << 8)));
+}
+
+static void tkip_phase1(const uint8_t tk[16], const uint8_t ta[6], uint32_t iv32,
+                        uint16_t p1k[5])
+{
+    int i;
+
+    p1k[0] = (uint16_t)(iv32 & 0xffff);
+    p1k[1] = (uint16_t)(iv32 >> 16);
+    p1k[2] = tkip_le16(ta + 0);
+    p1k[3] = tkip_le16(ta + 2);
+    p1k[4] = tkip_le16(ta + 4);
+
+    for (i = 0; i < 8; i++) {
+        int j = 2 * (i & 1);
+
+        p1k[0] = (uint16_t)(p1k[0] + tkip_s(p1k[4] ^ tkip_le16(tk + 0 + j)));
+        p1k[1] = (uint16_t)(p1k[1] + tkip_s(p1k[0] ^ tkip_le16(tk + 4 + j)));
+        p1k[2] = (uint16_t)(p1k[2] + tkip_s(p1k[1] ^ tkip_le16(tk + 8 + j)));
+        p1k[3] = (uint16_t)(p1k[3] + tkip_s(p1k[2] ^ tkip_le16(tk + 12 + j)));
+        p1k[4] = (uint16_t)(p1k[4] + tkip_s(p1k[3] ^ tkip_le16(tk + 0 + j)) + i);
+    }
+}
+
+static void tkip_phase2(const uint8_t tk[16], const uint16_t p1k[5], uint16_t iv16,
+                        uint8_t rc4key[16])
+{
+    uint16_t ppk[6];
+    int i;
+
+    for (i = 0; i < 5; i++)
+        ppk[i] = p1k[i];
+    ppk[5] = (uint16_t)(p1k[4] + iv16);
+
+    ppk[0] = (uint16_t)(ppk[0] + tkip_s(ppk[5] ^ tkip_le16(tk + 0)));
+    ppk[1] = (uint16_t)(ppk[1] + tkip_s(ppk[0] ^ tkip_le16(tk + 2)));
+    ppk[2] = (uint16_t)(ppk[2] + tkip_s(ppk[1] ^ tkip_le16(tk + 4)));
+    ppk[3] = (uint16_t)(ppk[3] + tkip_s(ppk[2] ^ tkip_le16(tk + 6)));
+    ppk[4] = (uint16_t)(ppk[4] + tkip_s(ppk[3] ^ tkip_le16(tk + 8)));
+    ppk[5] = (uint16_t)(ppk[5] + tkip_s(ppk[4] ^ tkip_le16(tk + 10)));
+    ppk[0] = (uint16_t)(ppk[0] + tkip_ror16(ppk[5] ^ tkip_le16(tk + 12), 1));
+    ppk[1] = (uint16_t)(ppk[1] + tkip_ror16(ppk[0] ^ tkip_le16(tk + 14), 1));
+    ppk[2] = (uint16_t)(ppk[2] + tkip_ror16(ppk[1], 1));
+    ppk[3] = (uint16_t)(ppk[3] + tkip_ror16(ppk[2], 1));
+    ppk[4] = (uint16_t)(ppk[4] + tkip_ror16(ppk[3], 1));
+    ppk[5] = (uint16_t)(ppk[5] + tkip_ror16(ppk[4], 1));
+
+    rc4key[0] = (uint8_t)(iv16 >> 8);
+    rc4key[1] = (uint8_t)(((iv16 >> 8) | 0x20) & 0x7f);
+    rc4key[2] = (uint8_t)(iv16 & 0xff);
+    rc4key[3] = (uint8_t)(((ppk[5] ^ tkip_le16(tk + 0)) >> 1) & 0xff);
+    for (i = 0; i < 6; i++)
+        tkip_put_le16(ppk[i], rc4key + 4 + 2 * i);
+    memset(ppk, 0, sizeof(ppk));
+}
+
+static void tkip_rc4(const uint8_t key[16], uint8_t *buf, size_t len)
+{
+    uint8_t s[256], j = 0, a = 0, b = 0, tmp;
+    size_t k;
+    unsigned int i;
+
+    for (i = 0; i < 256; i++)
+        s[i] = (uint8_t)i;
+    for (i = 0; i < 256; i++) {
+        j = (uint8_t)(j + s[i] + key[i & 15]);
+        tmp = s[i];
+        s[i] = s[j];
+        s[j] = tmp;
+    }
+    for (k = 0; k < len; k++) {
+        a = (uint8_t)(a + 1);
+        b = (uint8_t)(b + s[a]);
+        tmp = s[a];
+        s[a] = s[b];
+        s[b] = tmp;
+        buf[k] ^= s[(uint8_t)(s[a] + s[b])];
+    }
+    memset(s, 0, sizeof(s));
+}
+
+static uint32_t tkip_crc32(const uint8_t *buf, size_t len)
+{
+    uint32_t crc = 0xffffffffu;
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        int bit;
+
+        crc ^= buf[i];
+        for (bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+static void michael_block(uint32_t *l, uint32_t *r, uint32_t val)
+{
+    *l ^= val;
+    *r ^= rol32(*l, 17);
+    *l += *r;
+    *r ^= ((*l & 0xff00ff00u) >> 8) | ((*l & 0x00ff00ffu) << 8);
+    *l += *r;
+    *r ^= rol32(*l, 3);
+    *l += *r;
+    *r ^= ror32(*l, 2);
+    *l += *r;
+}
+
+void rtw89_michael_mic(const uint8_t key[8], const uint8_t da[6], const uint8_t sa[6],
+                       uint8_t prio, const uint8_t *data, size_t len,
+                       uint8_t mic[RTW89_TKIP_MIC_LEN])
+{
+    uint32_t l = tkip_le32(key), r = tkip_le32(key + 4), val;
+    size_t blocks = len / 4, left = len % 4, i;
+
+    michael_block(&l, &r, tkip_le32(da));
+    michael_block(&l, &r, (uint32_t)tkip_le16(da + 4) | ((uint32_t)tkip_le16(sa) << 16));
+    michael_block(&l, &r, tkip_le32(sa + 2));
+    michael_block(&l, &r, (uint32_t)prio);
+
+    for (i = 0; i < blocks; i++)
+        michael_block(&l, &r, tkip_le32(data + i * 4));
+
+    val = 0x5au;
+    while (left > 0) {
+        val <<= 8;
+        left--;
+        val |= data[blocks * 4 + left];
+    }
+    michael_block(&l, &r, val);
+    michael_block(&l, &r, 0);
+
+    tkip_put_le32(l, mic);
+    tkip_put_le32(r, mic + 4);
+}
+
+void rtw89_tkip_encrypt(const uint8_t key[RTW89_TKIP_KEY_LEN], const uint8_t ta[6],
+                        const uint8_t da[6], const uint8_t sa[6], uint8_t prio,
+                        uint32_t iv32, uint16_t iv16, uint8_t *buf, size_t msdu_len)
+{
+    uint16_t p1k[5];
+    uint8_t rc4key[16];
+    uint32_t icv;
+
+    rtw89_michael_mic(key + 16, da, sa, prio, buf, msdu_len, buf + msdu_len);
+    icv = tkip_crc32(buf, msdu_len + RTW89_TKIP_MIC_LEN);
+    tkip_put_le32(icv, buf + msdu_len + RTW89_TKIP_MIC_LEN);
+
+    tkip_phase1(key, ta, iv32, p1k);
+    tkip_phase2(key, p1k, iv16, rc4key);
+    tkip_rc4(rc4key, buf, msdu_len + RTW89_TKIP_MIC_LEN + RTW89_TKIP_ICV_LEN);
+
+    memset(p1k, 0, sizeof(p1k));
+    memset(rc4key, 0, sizeof(rc4key));
+}
+
+bool rtw89_tkip_decrypt(const uint8_t key[RTW89_TKIP_KEY_LEN], const uint8_t ta[6],
+                        const uint8_t da[6], const uint8_t sa[6], uint8_t prio,
+                        uint32_t iv32, uint16_t iv16, uint8_t *buf, size_t len)
+{
+    uint16_t p1k[5];
+    uint8_t rc4key[16], calc_mic[RTW89_TKIP_MIC_LEN], calc_icv[RTW89_TKIP_ICV_LEN];
+    size_t msdu_len;
+    bool ok;
+
+    if (len < RTW89_TKIP_MIC_LEN + RTW89_TKIP_ICV_LEN)
+        return false;
+    msdu_len = len - RTW89_TKIP_MIC_LEN - RTW89_TKIP_ICV_LEN;
+
+    tkip_phase1(key, ta, iv32, p1k);
+    tkip_phase2(key, p1k, iv16, rc4key);
+    tkip_rc4(rc4key, buf, len);
+    memset(p1k, 0, sizeof(p1k));
+    memset(rc4key, 0, sizeof(rc4key));
+
+    tkip_put_le32(tkip_crc32(buf, msdu_len + RTW89_TKIP_MIC_LEN), calc_icv);
+    if (!rtw89_crypto_equal(calc_icv, buf + msdu_len + RTW89_TKIP_MIC_LEN, RTW89_TKIP_ICV_LEN))
+        return false;
+
+    rtw89_michael_mic(key + 16, da, sa, prio, buf, msdu_len, calc_mic);
+    ok = rtw89_crypto_equal(calc_mic, buf + msdu_len, RTW89_TKIP_MIC_LEN);
+    memset(calc_mic, 0, sizeof(calc_mic));
+    return ok;
+}
+
 bool rtw89_crypto_equal(const uint8_t *a, const uint8_t *b, size_t len)
 {
     uint8_t diff = 0;

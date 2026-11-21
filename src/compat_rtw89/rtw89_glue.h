@@ -156,6 +156,7 @@ bool rtw89_glue_is_up(void);
 int rtw89_glue_awdl_vif_create(const uint8_t mac[6]);
 int rtw89_glue_awdl_vif_destroy(void);
 bool rtw89_glue_awdl_vif_present(void);
+bool rtw89_glue_awdl_capable(void);
 #if defined(OWLY_NATIVE_PEER_DATA) && OWLY_NATIVE_PEER_DATA
 int rtw89_glue_awdl_vif_enable(void);
 #endif

@@ -145,6 +145,7 @@ private:
     SInt32 owlyEnableVirtualInterfaceOnGate(IO80211VirtualInterface *vif);
     SInt32 owlyDisableVirtualInterfaceOnGate(IO80211VirtualInterface *vif);
     bool owlyVifIsTracked(IO80211VirtualInterface *vif);
+    bool owlyBackendAWDLCapable();
 #if defined(OWLY_AWDL_SERVICE_LIFECYCLE) && OWLY_AWDL_SERVICE_LIFECYCLE
     struct OwlyServiceCall {
         IO80211Interface *interface;

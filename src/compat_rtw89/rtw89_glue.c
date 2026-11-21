@@ -2387,10 +2387,23 @@ static void owly_core04c_vif_unregister(struct ieee80211_hw *hw)
  */
 static bool glue_awdl_chip_capable(void)
 {
-    const struct ieee80211_ops *ops = hw_to_local(glue_hw())->ops;
+    struct ieee80211_hw *hw = glue_hw();
+    const struct ieee80211_ops *ops;
 
+    if (!hw)
+        return false;
+    ops = hw_to_local(hw)->ops;
     return ops->add_chanctx && ops->remove_chanctx &&
            ops->assign_vif_chanctx && ops->unassign_vif_chanctx;
+}
+
+bool rtw89_glue_awdl_capable(void)
+{
+#if OWLY_BACKEND_REAL_VIF
+    return glue.active && glue.probed && glue_awdl_chip_capable();
+#else
+    return false;
+#endif
 }
 
 int rtw89_glue_awdl_vif_create(const uint8_t mac[6])

@@ -1,0 +1,57 @@
+name: Build AirPort_RTW89
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and build kext
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Fetch Realtek firmware
+        run: make fetch-firmware
+
+      - name: Fetch IO80211FamilyLegacy for front import check
+        run: |
+          mkdir -p efi/kit
+          curl -fsSL -o /tmp/IO80211FamilyLegacy.zip \
+            "https://github.com/dortania/OpenCore-Legacy-Patcher/raw/d9604c36a432eaf243ea18659ff4d208187452d7/payloads/Kexts/Wifi/IO80211FamilyLegacy-v1.0.0.zip"
+          unzip -qo /tmp/IO80211FamilyLegacy.zip -d efi/kit
+          test -f efi/kit/IO80211FamilyLegacy.kext/Contents/MacOS/IO80211FamilyLegacy
+
+      - name: Build and test bundle
+        run: make bundle
+
+      - name: Package artifact
+        run: |
+          mkdir -p build/artifact
+          cp -R build/out/bundle/AirPort_RTW89.kext build/artifact/
+          cp build/out/rtw89ctl build/artifact/
+          cd build/artifact && COPYFILE_DISABLE=1 zip -qry AirPort_RTW89-patched.zip AirPort_RTW89.kext rtw89ctl
+
+      - name: Upload AirPort_RTW89 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirPort_RTW89-patched
+          path: build/artifact/AirPort_RTW89-patched.zip
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build/log/*
+          if-no-files-found: ignore
+          retention-days: 7
