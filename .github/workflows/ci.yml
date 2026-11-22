@@ -30,8 +30,14 @@ jobs:
           unzip -qo /tmp/IO80211FamilyLegacy.zip -d efi/kit
           test -f efi/kit/IO80211FamilyLegacy.kext/Contents/MacOS/IO80211FamilyLegacy
 
-      - name: Build and test bundle
-        run: make bundle
+      - name: Run core smoke tests
+        run: make hosttest HOST_CHIP_IDS="" HOST_ALARM=1200
+
+      - name: Run dead-device probe matrix
+        run: make hosttest HOST_RUNS="" HOST_FAKE_RUNS="" HOST_SAE="" HOST_LOGS="" HOST_ALARM=1200
+
+      - name: Build bundle
+        run: make bundle NOTEST=1
 
       - name: Package artifact
         run: |

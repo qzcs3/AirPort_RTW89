@@ -355,6 +355,7 @@ OTHER_CHIP_IDS := b851 8852 a85a b85b b520 c852 8922 892b 892d 882d 895d
 #
 # Each entry is "<arguments>:<log name>", quoted because the arguments have
 # spaces in them: make pastes the text and the shell's own loop parses it.
+HOST_ALARM     ?= 600
 ifeq ($(QUICK),1)
 HOST_RUNS      := "00:hosttest_00"
 HOST_FAKE_RUNS := "00 ok:hosttest_fakechip"
@@ -373,7 +374,7 @@ endif
 
 define hostrun
 	@echo "  RUN  $(1) $(2)"
-	@perl -e 'alarm 600; exec @ARGV' $(1) $(2) > $(BUILD_DIR)/log/$(3).log 2>&1; \
+	@perl -e 'alarm $(HOST_ALARM); exec @ARGV' $(1) $(2) > $(BUILD_DIR)/log/$(3).log 2>&1; \
 	    rc=$$?; grep -E '^==|WARN|BUG|HOST:|mlme\]' $(BUILD_DIR)/log/$(3).log; \
 	    [ $$rc -eq 0 ] || { echo "  hosttest FAILED (exit $$rc), see $(BUILD_DIR)/log/$(3).log"; exit 1; }
 endef
@@ -426,23 +427,23 @@ hosttest: link scanrequesttest
 	@#
 	@rm -f $(BUILD_DIR)/log/*.failed; \
 	for a in $(HOST_RUNS); do \
-	    perl -e 'alarm 600; exec @ARGV' $(HOSTTEST) $${a%%:*} \
+	    perl -e 'alarm $(HOST_ALARM); exec @ARGV' $(HOSTTEST) $${a%%:*} \
 	        > $(BUILD_DIR)/log/$${a#*:}.log 2>&1 \
 	        || echo "  hosttest FAILED ($${a%%:*}), see $(BUILD_DIR)/log/$${a#*:}.log" \
 	        > $(BUILD_DIR)/log/$${a#*:}.failed & \
 	done; \
 	for a in $(HOST_FAKE_RUNS); do \
-	    perl -e 'alarm 600; exec @ARGV' $(HOSTTEST)_fakechip $${a%%:*} \
+	    perl -e 'alarm $(HOST_ALARM); exec @ARGV' $(HOSTTEST)_fakechip $${a%%:*} \
 	        > $(BUILD_DIR)/log/$${a#*:}.log 2>&1 \
 	        || echo "  hosttest FAILED ($${a%%:*}), see $(BUILD_DIR)/log/$${a#*:}.log" \
 	        > $(BUILD_DIR)/log/$${a#*:}.failed & \
 	done; \
-	[ -z "$(HOST_SAE)" ] || perl -e 'alarm 600; exec @ARGV' $(SAETEST)_kernel \
+	[ -z "$(HOST_SAE)" ] || perl -e 'alarm $(HOST_ALARM); exec @ARGV' $(SAETEST)_kernel \
 	    > $(BUILD_DIR)/log/sae_test_kernel.log 2>&1 \
 	    || echo "  sae_test FAILED, see $(BUILD_DIR)/log/sae_test_kernel.log" \
 	    > $(BUILD_DIR)/log/sae_test_kernel.failed & \
 	for id in $(HOST_CHIP_IDS); do for fill in 00 ff; do \
-	    perl -e 'alarm 600; exec @ARGV' $(HOSTTEST) $$fill dead $$id \
+	    perl -e 'alarm $(HOST_ALARM); exec @ARGV' $(HOSTTEST) $$fill dead $$id \
 	        > $(BUILD_DIR)/log/hosttest_$${id}_$$fill.log 2>&1 \
 	        || echo "  hosttest FAILED for 10ec:$$id ($$fill), see $(BUILD_DIR)/log/hosttest_$${id}_$$fill.log" \
 	        > $(BUILD_DIR)/log/hosttest_$${id}_$$fill.failed & \
