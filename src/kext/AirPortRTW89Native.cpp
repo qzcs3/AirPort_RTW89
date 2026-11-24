@@ -325,23 +325,27 @@ static uint32_t le32(const uint8_t *p)
 
 static bool decodeHostAssoc(const uint8_t *p, struct HostAssoc *out)
 {
-    uint32_t upper = le32(p + 12), ssidLen = le32(p + 16), keyLen = le32(p + 64);
+    uint32_t mode = le32(p + 4), upper = le32(p + 12), ssidLen = le32(p + 16), keyLen = le32(p + 64);
 
     /* the key's version at 60: none on an open network (seen on
      * TDSB-Guest, Sequoia's 900 bytes) */
-    if (le32(p) != 1 || le32(p + 4) != 2 || le32(p + 8) != 1 ||
+    if (le32(p) != 1 ||
+        (mode != APPLE80211_AP_MODE_UNKNOWN && mode != APPLE80211_AP_MODE_INFRA &&
+         mode != APPLE80211_AP_MODE_ANY) ||
+        le32(p + 8) != 1 ||
         (le32(p + 60) != 1 && !(le32(p + 60) == 0 && upper == 0 && keyLen == 0)))
         return false;
     const uint32_t cipher = le32(p + 68);
-    /* SAE, alone or with WPA2-PSK (a mixed network) */
-    const bool sae = (upper & kSaeAuth) && !(upper & ~(kSaeAuth | 8));
-    const bool passphrase = (upper == 8 || sae) && cipher == kHostCipherPassphrase;
+    /* WPA/WPA2-PSK (including mixed WPA/WPA2 or SHA256-PSK), or SAE alone/mixed */
+    const bool personal = (upper & kPersonalAuth) && !(upper & ~kPersonalAuth);
+    const bool sae = (upper & kSaeAuth) && !(upper & ~(kSaeAuth | kPersonalAuth));
+    const bool passphrase = (personal || sae) && cipher == kHostCipherPassphrase;
 
-    if ((upper != 0 && upper != 8 && !sae && !isEnterprise(upper)) || !ssidLen || ssidLen > 32)
+    if ((upper != 0 && !personal && !sae && !isEnterprise(upper)) || !ssidLen || ssidLen > 32)
         return false;
     if (sae && !passphrase)
         return false;
-    if (passphrase ? keyLen < 1 || keyLen > 64 : upper == 8 ? keyLen != 32 : keyLen != 0)
+    if (passphrase ? keyLen < 1 || keyLen > 64 : personal ? keyLen != 32 : keyLen != 0)
         return false;
     for (uint32_t i = 0; i < ssidLen; i++)
         if (!p[20 + i])

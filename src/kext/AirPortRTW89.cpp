@@ -517,10 +517,14 @@ bool AirPort_RTW89::start(IOService *provider)
     _powerNotifier = registerPrioritySleepWakeInterest(&AirPort_RTW89::powerEvent, this);
     if (connectFront()) {
         /* Wi-Fi is on until macOS says otherwise */
+        IOLockLock(_commandLock);
         int up = radioUp();
+        IOLockUnlock(_commandLock);
 
         if (up)
             LOG("could not start the radio: %d", up);
+        else
+            nativePowerChanged();
         publishLink();
     } else if (!setupInterface()) {
         LOG("could not create the network interface");
